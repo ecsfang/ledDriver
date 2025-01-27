@@ -16,6 +16,7 @@
 */
 #include <ESP8266WiFi.h>
 #include "secrets.h"
+#include <ArduinoOTA.h>
 #include "PubSubClient.h"
 #include <EasyButton.h>
 #include <Encoder.h>
@@ -23,9 +24,9 @@
 #define MINRANGE  100   // min pwm value
 #define MAXRANGE  1023  // max pwm value
 #define POWER_OFF 0
-#define STEP1     40
-#define STEP2     80
-#define STEP3     120
+#define STEP1     200
+#define STEP2     400
+#define STEP3     800
 
 #define LED_ON    LOW
 #define LED_OFF   HIGH
@@ -76,6 +77,7 @@ Encoder myEnc(EN_PIN_A, EN_PIN_B);
 //unsigned char last_encoder_B;
 
 int led_power = 0;
+int off_power = 0;
 int last_led_power = MAXRANGE;
 int power_step = 1;
 //long loop_time;
@@ -88,6 +90,19 @@ int power_step = 1;
 
 void updateLeds(void)
 {
+  if( led_power ) {
+    for(int i=0; i<led_power; i+=10) {
+      analogWrite(LED_PWM_PIN, i);            // Drive the MOSFET
+      analogWrite(LED_GREEN, 1023-i);         // ... and the encoder LED
+      delay(20);
+    }
+  } else {
+    for(int i=off_power-1; i>0; i-=10) {
+      analogWrite(LED_PWM_PIN, i);            // Drive the MOSFET
+      analogWrite(LED_GREEN, 1023-i);         // ... and the encoder LED
+      delay(20);
+    }
+  }
   analogWrite(LED_PWM_PIN, led_power);            // Drive the MOSFET
   analogWrite(LED_GREEN, 1023-led_power);         // ... and the encoder LED
 }
@@ -100,6 +115,7 @@ void buttonPressed()
   if ( led_power == POWER_OFF ) {                 // If light is off, set brightness to last saved value
     led_power = last_led_power;
   } else {                                        // if light is on, turn it off (and don't save brightness)
+    off_power = led_power;
     led_power = POWER_OFF;
   }
   ShowDebug( "Button pressed - L ==> " + String(led_power) );
@@ -111,6 +127,7 @@ void buttonPressedLong()
   if ( led_power == POWER_OFF ) {                 // If light is off, set brightness to max
     led_power = MAXRANGE;
   } else {                                        // if light is on, save brightness and turn light off
+    off_power = led_power;
     last_led_power = led_power;
     led_power = POWER_OFF;
   }
@@ -216,8 +233,24 @@ void callback(char* topic, byte * payload, unsigned int length) {
 
 void setup() {
 
+  pinMode(LED_PWM_PIN, OUTPUT);
+  // Set brightness to 0
+  analogWrite(LED_PWM_PIN, POWER_OFF);
   // set up PWM range
   analogWriteRange(MAXRANGE);
+
+  // Set gpio pins
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(LED_BLUE, OUTPUT);
+  pinMode(LED_RED, OUTPUT);
+  pinMode(EN_PIN_A, INPUT_PULLUP);
+  pinMode(EN_PIN_B, INPUT_PULLUP);
+  pinMode(BTN_PIN, INPUT_PULLUP);
+
+  // and enable encoder LEDs
+  digitalWrite(LED_GREEN, LED_OFF);
+  digitalWrite(LED_BLUE, LED_OFF);
+  digitalWrite(LED_RED, LED_OFF);
 
   // set up serial comms
   Serial.begin( 115200 );
@@ -230,31 +263,22 @@ void setup() {
   ShowDebug("Connecting to ");
   ShowDebug(ssid);
 
-  // Set gpio pins
-  pinMode(LED_GREEN, OUTPUT);
-  pinMode(LED_BLUE, OUTPUT);
-  pinMode(LED_RED, OUTPUT);
-  pinMode(EN_PIN_A, INPUT_PULLUP);
-  pinMode(EN_PIN_B, INPUT_PULLUP);
-  pinMode(BTN_PIN, INPUT_PULLUP);
-
-  // Set brightness to 0
-  analogWrite(LED_PWM_PIN, POWER_OFF);
-  // and enable encoder LEDs
-  digitalWrite(LED_GREEN, LED_OFF);
-  digitalWrite(LED_BLUE, LED_OFF);
-  digitalWrite(LED_RED, LED_OFF);
+  int x;
+  for(x=0; x<=20; x++) {
+    digitalWrite(LED_GREEN, x&1 ? LED_ON:LED_OFF);
+    delay(50);
+  }
 
   // Connect to Wifi
   int led = true;
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
-    digitalWrite(LED_RED, led ? LED_ON : LED_OFF);
+    digitalWrite(LED_BLUE, led ? LED_ON : LED_OFF);
     led = !led;
     delay(500);
     Serial.print(".");
   }
-  digitalWrite(LED_RED, LED_OFF);
+  digitalWrite(LED_BLUE, LED_OFF);
 
   //convert ip Array into String
   ip = String (WiFi.localIP()[0]);
@@ -276,6 +300,44 @@ void setup() {
   ShowDebug(F("MQTT client configured"));
   mqttClient.setCallback(callback);
 
+  ShowDebug(F("Init OTA ..."));
+  ArduinoOTA.setHostname(otaHost);
+  ArduinoOTA.setPassword(flashpw);
+
+  ArduinoOTA.onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH) {
+      type = "sketch";
+    } else { // U_SPIFFS
+      type = "filesystem";
+    }
+    // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+    ShowDebug("Start updating " + type);
+  });
+  ArduinoOTA.onEnd([]() {
+    ShowDebug("\nEnd");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) {
+      Serial.println("Auth Failed");
+    } else if (error == OTA_BEGIN_ERROR) {
+      Serial.println("Begin Failed");
+    } else if (error == OTA_CONNECT_ERROR) {
+      Serial.println("Connect Failed");
+    } else if (error == OTA_RECEIVE_ERROR) {
+      Serial.println("Receive Failed");
+    } else if (error == OTA_END_ERROR) {
+      Serial.println("End Failed");
+    } else {
+      Serial.println("Unknown error!");
+    }
+  });
+  ArduinoOTA.begin();
+
   // Initialize the button.
   button.begin();
 
@@ -296,6 +358,7 @@ void loop() {
     reconnect();
   }
   mqttClient.loop();
+  ArduinoOTA.handle();
 
   button.update();
 
